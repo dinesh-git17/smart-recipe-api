@@ -4,3 +4,10 @@ sqlalchemy
 pydantic
 colorlog
 plotly
+pandas
+numpy
+matplotlib
+seaborn
+thefuzz
+rich
+jinja2

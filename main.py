@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Optional
@@ -17,13 +17,13 @@ from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.ext.declarative import declarative_base
 import uvicorn
 
-# Import our custom logger and secret configuration
+# Custom logger and secret configuration
 from mylogger import logger
-
 
 templates = Jinja2Templates(directory="templates")
 
 # Database configuration: using SQLite for simplicity.
+# IMPORTANT: If you see "no such column: recipes.rating", delete recipes.db so that the new schema is created.
 DATABASE_URL = "sqlite:///./recipes.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -135,7 +135,7 @@ def startup_event():
     logger.info("Visit http://127.0.0.1:8000/redoc for alternative documentation.")
 
 
-# Welcome endpoint: returns a visually pleasing HTML welcome page.
+# Welcome endpoint: returns a simple HTML welcome message.
 @app.get(
     "/",
     response_class=HTMLResponse,
@@ -143,18 +143,50 @@ def startup_event():
     description="Displays a welcome page with instructions.",
 )
 def read_root(request: Request):
-    return templates.TemplateResponse("welcome.html", {"request": request})
+    content = """
+    <html>
+      <head><title>Smart Recipe API - Welcome</title></head>
+      <body style="font-family: 'Segoe UI', sans-serif; background-color: #f5f5f5; text-align: center; padding-top: 50px;">
+        <h1>Welcome to the Smart Recipe API! 🍲</h1>
+        <p>Manage and discover delicious recipes with ease.</p>
+        <p>Visit /docs for interactive API docs, /redoc for alternative docs, and /help for a getting started guide.</p>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=content)
 
 
-# Help endpoint: renders the Getting Started Guide from a template.
+# Help endpoint: returns a JSON guide.
 @app.get(
     "/help",
-    response_class=HTMLResponse,
     summary="Getting Started Guide",
-    description="Provides a guide on how to use the API.",
+    description="Provides sample API calls and instructions to use the API.",
 )
-def help_page(request: Request):
-    return templates.TemplateResponse("help.html", {"request": request})
+def get_help():
+    help_text = {
+        "Endpoints": {
+            "GET /recipes/": "Retrieve a list of recipes.",
+            "POST /recipes/": "Create a new recipe. (Requires JSON payload.)",
+            "GET /recipes/{recipe_id}": "Retrieve details of a specific recipe.",
+            "PUT /recipes/{recipe_id}": "Update an existing recipe.",
+            "DELETE /recipes/{recipe_id}": "Delete a recipe.",
+            "GET /help": "View this help message.",
+        },
+        "Sample POST Payload for /recipes/": {
+            "title": "Spaghetti Bolognese",
+            "description": "A classic Italian pasta dish",
+            "instructions": "Boil pasta. Prepare sauce. Combine and serve.",
+            "rating": 4.5,
+            "ingredient_names": [
+                "Spaghetti",
+                "Tomato",
+                "Ground Beef",
+                "Onion",
+                "Garlic",
+            ],
+        },
+    }
+    return help_text
 
 
 @app.post(
@@ -164,23 +196,31 @@ def help_page(request: Request):
     description="Creates a new recipe along with its ingredients. If an ingredient doesn't exist, it will be created.",
 )
 def create_recipe(recipe: RecipeCreate, db: Session = Depends(get_db)):
-    db_recipe = Recipe(
-        title=recipe.title,
-        description=recipe.description,
-        instructions=recipe.instructions,
-        rating=recipe.rating,
-    )
-    for ingredient_name in recipe.ingredient_names:
-        ingredient = (
-            db.query(Ingredient).filter(Ingredient.name == ingredient_name).first()
+    try:
+        db_recipe = Recipe(
+            title=recipe.title,
+            description=recipe.description,
+            instructions=recipe.instructions,
+            rating=recipe.rating,
         )
-        if not ingredient:
-            ingredient = Ingredient(name=ingredient_name)
-        db_recipe.ingredients.append(ingredient)
-    db.add(db_recipe)
-    db.commit()
-    db.refresh(db_recipe)
-    return db_recipe
+        for ingredient_name in recipe.ingredient_names:
+            ingredient = (
+                db.query(Ingredient).filter(Ingredient.name == ingredient_name).first()
+            )
+            if not ingredient:
+                ingredient = Ingredient(name=ingredient_name)
+            db_recipe.ingredients.append(ingredient)
+        db.add(db_recipe)
+        db.commit()
+        db.refresh(db_recipe)
+        return db_recipe
+    except Exception as e:
+        logger.error(f"Error creating recipe: {e}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Error creating recipe. Please check the server logs for details.",
+        )
 
 
 @app.get(
@@ -190,8 +230,14 @@ def create_recipe(recipe: RecipeCreate, db: Session = Depends(get_db)):
     description="Retrieves a list of recipes with optional pagination.",
 )
 def read_recipes(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
-    recipes = db.query(Recipe).offset(skip).limit(limit).all()
-    return recipes
+    try:
+        recipes = db.query(Recipe).offset(skip).limit(limit).all()
+        return recipes
+    except Exception as e:
+        logger.error(f"Error reading recipes: {e}")
+        raise HTTPException(
+            status_code=500, detail="Error retrieving recipes. Please try again later."
+        )
 
 
 @app.get(
@@ -201,10 +247,16 @@ def read_recipes(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
     description="Retrieve details for a specific recipe by its ID.",
 )
 def read_recipe(recipe_id: int, db: Session = Depends(get_db)):
-    recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
-    if recipe is None:
-        raise HTTPException(status_code=404, detail="Recipe not found")
-    return recipe
+    try:
+        recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
+        if recipe is None:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+        return recipe
+    except Exception as e:
+        logger.error(f"Error retrieving recipe {recipe_id}: {e}")
+        raise HTTPException(
+            status_code=500, detail="Error retrieving recipe. Please try again later."
+        )
 
 
 @app.put(
@@ -214,24 +266,31 @@ def read_recipe(recipe_id: int, db: Session = Depends(get_db)):
     description="Update an existing recipe by its ID.",
 )
 def update_recipe(recipe_id: int, recipe: RecipeCreate, db: Session = Depends(get_db)):
-    db_recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
-    if db_recipe is None:
-        raise HTTPException(status_code=404, detail="Recipe not found")
-    db_recipe.title = recipe.title
-    db_recipe.description = recipe.description
-    db_recipe.instructions = recipe.instructions
-    db_recipe.rating = recipe.rating
-    db_recipe.ingredients = []
-    for ingredient_name in recipe.ingredient_names:
-        ingredient = (
-            db.query(Ingredient).filter(Ingredient.name == ingredient_name).first()
+    try:
+        db_recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
+        if db_recipe is None:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+        db_recipe.title = recipe.title
+        db_recipe.description = recipe.description
+        db_recipe.instructions = recipe.instructions
+        db_recipe.rating = recipe.rating
+        db_recipe.ingredients = []
+        for ingredient_name in recipe.ingredient_names:
+            ingredient = (
+                db.query(Ingredient).filter(Ingredient.name == ingredient_name).first()
+            )
+            if not ingredient:
+                ingredient = Ingredient(name=ingredient_name)
+            db_recipe.ingredients.append(ingredient)
+        db.commit()
+        db.refresh(db_recipe)
+        return db_recipe
+    except Exception as e:
+        logger.error(f"Error updating recipe {recipe_id}: {e}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500, detail="Error updating recipe. Please try again later."
         )
-        if not ingredient:
-            ingredient = Ingredient(name=ingredient_name)
-        db_recipe.ingredients.append(ingredient)
-    db.commit()
-    db.refresh(db_recipe)
-    return db_recipe
 
 
 @app.delete(
@@ -240,12 +299,19 @@ def update_recipe(recipe_id: int, recipe: RecipeCreate, db: Session = Depends(ge
     description="Delete a recipe by its ID.",
 )
 def delete_recipe(recipe_id: int, db: Session = Depends(get_db)):
-    db_recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
-    if db_recipe is None:
-        raise HTTPException(status_code=404, detail="Recipe not found")
-    db.delete(db_recipe)
-    db.commit()
-    return {"detail": "Recipe deleted"}
+    try:
+        db_recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
+        if db_recipe is None:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+        db.delete(db_recipe)
+        db.commit()
+        return {"detail": "Recipe deleted"}
+    except Exception as e:
+        logger.error(f"Error deleting recipe {recipe_id}: {e}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500, detail="Error deleting recipe. Please try again later."
+        )
 
 
 if __name__ == "__main__":
