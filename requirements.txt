@@ -11,3 +11,4 @@ seaborn
 thefuzz
 rich
 jinja2
+requests
